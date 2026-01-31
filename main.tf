@@ -141,6 +141,9 @@ resource "aws_lambda_function" "api_to_sqs" {
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout          = 10
+  tracing_config {
+    mode = "Active"
+  }
   environment {
     variables = { 
       QUEUE_URL = jsondecode(aws_secretsmanager_secret_version.app_secrets.secret_string)["QUEUE_URL"]
@@ -218,6 +221,30 @@ resource "aws_iam_role_policy_attachment" "ecs_exec_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+resource "aws_iam_role_policy_attachment" "ecs_xray_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess"
+}
+
+# ------------------------
+# CloudWatch Log Groups
+# ------------------------
+resource "aws_cloudwatch_log_group" "task_1" {
+  name              = "/ecs/loopper-task-1"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_log_group" "task_2" {
+  name              = "/ecs/loopper-task-2"
+  retention_in_days = 7
+}
+
+resource "aws_cloudwatch_log_group" "task_3" {
+  name              = "/ecs/loopper-task-3"
+  retention_in_days = 7
+}
+
+
 # ------------------------
 # ECR Repositories
 # ------------------------
@@ -274,6 +301,14 @@ resource "aws_ecs_task_definition" "task_1" {
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
       { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
     ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.task_1.name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "ecs"
+      }
+    }
   }])
 }
 
@@ -291,6 +326,14 @@ resource "aws_ecs_task_definition" "task_2" {
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
       { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
     ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.task_2.name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "ecs"
+      }
+    }
   }])
 }
 
@@ -476,6 +519,9 @@ resource "aws_lambda_function" "s3_to_ecs" {
   filename         = data.archive_file.s3_zip.output_path
   source_code_hash = data.archive_file.s3_zip.output_base64sha256
   timeout          = 10
+  tracing_config {
+    mode = "Active"
+  }
 
   environment {
     variables = {
@@ -520,6 +566,14 @@ resource "aws_ecs_task_definition" "task_3" {
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
       { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
     ]
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.task_3.name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "ecs"
+      }
+    }
   }])
 }
 
@@ -605,4 +659,81 @@ output "db_endpoint" {
 
 output "redis_endpoint" {
   value = aws_elasticache_replication_group.redis.primary_endpoint_address
+}
+
+# ------------------------
+# CloudWatch Alarms
+# ------------------------
+resource "aws_cloudwatch_metric_alarm" "ecs_cpu_high" {
+  alarm_name          = "ecs-service-1-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "Scale down if CPU > 80%"
+  dimensions = {
+    ClusterName = aws_ecs_cluster.main.name
+    ServiceName = aws_ecs_service.service_1.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "sqs_old_messages" {
+  alarm_name          = "sqs-old-messages"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "1"
+  metric_name         = "ApproximateAgeOfOldestMessage"
+  namespace           = "AWS/SQS"
+  period              = "60"
+  statistic           = "Maximum"
+  threshold           = "300" # 5 minutes
+  dimensions = {
+    QueueName = aws_sqs_queue.freshdesk_queue.name
+  }
+}
+
+# ------------------------
+# CloudWatch Dashboard
+# ------------------------
+resource "aws_cloudwatch_dashboard" "main" {
+  dashboard_name = "Loopper-Overview"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        type   = "metric"
+        x      = 0
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/ECS", "CPUUtilization", "ServiceName", aws_ecs_service.service_1.name, "ClusterName", aws_ecs_cluster.main.name]
+          ]
+          period = 300
+          stat   = "Average"
+          region = data.aws_region.current.name
+          title  = "Service 1 CPU Utilization"
+        }
+      },
+      {
+        type   = "metric"
+        x      = 12
+        y      = 0
+        width  = 12
+        height = 6
+        properties = {
+          metrics = [
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.freshdesk_queue.name]
+          ]
+          period = 300
+          stat   = "Average"
+          region = data.aws_region.current.name
+          title  = "SQS Message Volume"
+        }
+      }
+    ]
+  })
 }
