@@ -7,6 +7,10 @@ terraform {
       source  = "hashicorp/aws"
       version = "~> 5.30"
     }
+    qdrant-cloud = {
+      source  = "qdrant/qdrant-cloud"
+      version = "~> 1.1.0"
+    }
   }
   required_version = ">= 1.4.0"
 }
@@ -73,6 +77,91 @@ resource "aws_security_group" "db_sg" {
     security_groups = [aws_security_group.ecs_sg.id]
   }
 }
+
+# ------------------------
+# VPC Endpoints (EU Compliance Layer)
+# ------------------------
+resource "aws_security_group" "vpc_endpoints_sg" {
+  name        = "loopper-vpc-endpoints-sg"
+  description = "Security group for VPC Interface Endpoints"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    from_port       = 443
+    to_port         = 443
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ecs_sg.id]
+  }
+}
+
+# 1. S3 Gateway (Free)
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = module.vpc.vpc_id
+  service_name      = "com.amazonaws.${data.aws_region.current.name}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = module.vpc.private_route_table_ids
+}
+
+# 2. Secrets Manager (Interface)
+resource "aws_vpc_endpoint" "secrets" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
+# 3. ECR API (Interface)
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
+# 4. ECR Docker (Interface)
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
+# 5. CloudWatch Logs (Interface)
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
+# 6. X-Ray (Interface)
+resource "aws_vpc_endpoint" "xray" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.xray"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
+# 7. SQS (Interface)
+resource "aws_vpc_endpoint" "sqs" {
+  vpc_id              = module.vpc.vpc_id
+  service_name        = "com.amazonaws.${data.aws_region.current.name}.sqs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = module.vpc.private_subnet_ids
+  security_group_ids  = [aws_security_group.vpc_endpoints_sg.id]
+  private_dns_enabled = true
+}
+
 
 # ------------------------
 # RDS Instance
@@ -146,7 +235,9 @@ resource "aws_lambda_function" "api_to_sqs" {
   }
   environment {
     variables = { 
-      QUEUE_URL = jsondecode(aws_secretsmanager_secret_version.app_secrets.secret_string)["QUEUE_URL"]
+      QUEUE_URL      = jsondecode(aws_secretsmanager_secret_version.app_secrets.secret_string)["QUEUE_URL"]
+      QDRANT_URL     = jsondecode(aws_secretsmanager_secret_version.app_secrets.secret_string)["QDRANT_URL"]
+      QDRANT_API_KEY = jsondecode(aws_secretsmanager_secret_version.app_secrets.secret_string)["QDRANT_API_KEY"]
     }
   }
 }
@@ -197,13 +288,15 @@ resource "aws_secretsmanager_secret" "app_secrets" {
 resource "aws_secretsmanager_secret_version" "app_secrets" {
   secret_id = aws_secretsmanager_secret.app_secrets.id
   secret_string = jsonencode({
-    DB_HOST          = aws_db_instance.postgres.address
-    REDIS_HOST       = aws_elasticache_replication_group.redis.primary_endpoint_address
-    QUEUE_URL        = aws_sqs_queue.freshdesk_queue.id
-    ECS_CLUSTER      = aws_ecs_cluster.main.id
+    DB_HOST           = aws_db_instance.postgres.address
+    REDIS_HOST        = aws_elasticache_replication_group.redis.primary_endpoint_address
+    QUEUE_URL         = aws_sqs_queue.freshdesk_queue.id
+    ECS_CLUSTER       = aws_ecs_cluster.main.id
     TASK_DEFINITION_3 = aws_ecs_task_definition.task_3.arn
-    PRIVATE_SUBNETS  = join(",", module.vpc.private_subnet_ids)
-    ECS_SG           = aws_security_group.ecs_sg.id
+    PRIVATE_SUBNETS   = join(",", module.vpc.private_subnet_ids)
+    ECS_SG            = aws_security_group.ecs_sg.id
+    QDRANT_URL        = "https://c88e4d95-ef3b-4ba2-ad9f-08c95374f010.eu-central-1-0.aws.cloud.qdrant.io:6333"
+    QDRANT_API_KEY    = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2Nlc3MiOiJtIn0.jhgYhoBMu_ixrRcE-LL5FN0ax0CJXM_MonutTxqZjbA"
   })
 }
 
@@ -299,7 +392,9 @@ resource "aws_ecs_task_definition" "task_1" {
     image = "nginx:latest"
     secrets = [
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
-      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
+      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" },
+      { name = "QDRANT_URL", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_URL::" },
+      { name = "QDRANT_API_KEY", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_API_KEY::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -324,7 +419,9 @@ resource "aws_ecs_task_definition" "task_2" {
     image = "nginx:latest"
     secrets = [
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
-      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
+      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" },
+      { name = "QDRANT_URL", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_URL::" },
+      { name = "QDRANT_API_KEY", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_API_KEY::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -564,7 +661,9 @@ resource "aws_ecs_task_definition" "task_3" {
     image = "nginx:latest"
     secrets = [
       { name = "DB_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:DB_HOST::" },
-      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" }
+      { name = "REDIS_HOST", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:REDIS_HOST::" },
+      { name = "QDRANT_URL", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_URL::" },
+      { name = "QDRANT_API_KEY", valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:QDRANT_API_KEY::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"

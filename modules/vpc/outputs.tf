@@ -41,3 +41,8 @@ output "vpc_name" {
   description = "Name of the VPC"
   value       = var.vpc_name
 }
+
+output "private_route_table_ids" {
+  description = "IDs of the private route tables"
+  value       = [aws_route_table.private.id]
+}
